@@ -1,2 +1,2 @@
 # dw
-Dantzig Wolfe decomposition
+Dantzig-Wolfe decomposition package for solving block-angular structured problems.
