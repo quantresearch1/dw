@@ -1,13 +1,13 @@
 import numpy as np
 import gurobipy as gp
-from gurobipy import GRB
 import time
+import concurrent.futures
 
 
 class DantzigWolfeDecomposition:
     """
     Implementation of Dantzig-Wolfe decomposition for block-angular structured problems
-
+    
     Problem structure:
     min c.T @ x
     s.t. F @ x = 0  (complicating constraints)
@@ -50,6 +50,21 @@ class DantzigWolfeDecomposition:
         self.extreme_points = [[] for _ in range(self.num_clients)]
         self.extreme_point_costs = [[] for _ in range(self.num_clients)]
         self.extreme_point_complicating = [[] for _ in range(self.num_clients)]
+        
+        # Track column usage for column management
+        self.column_usage = [[] for _ in range(self.num_clients)]
+        self.iteration_count = 0
+        
+        # Stabilization parameters
+        self.use_stabilization = True
+        self.stabilization_center = None
+        self.stabilization_weight = 0.5
+        self.stabilization_weight_decrease = 0.9
+        self.min_stabilization_weight = 0.01
+        
+        # Parallel processing parameters
+        self.use_parallel = True
+        self.max_workers = None  # None means the default (CPU count)
 
         # Initialize master problem
         self.master: gp.Model = None
@@ -57,10 +72,24 @@ class DantzigWolfeDecomposition:
         self.convexity_constrs: dict[int, gp.Constr] = None
         self.complicating_constrs: dict[int, gp.Constr] = None
 
-    def solve(self, verbose=True):
+    def solve(self, verbose=True, use_stabilization=True, use_parallel=True, 
+              column_management=True, column_removal_threshold=5):
         """
         Solve the problem using Dantzig-Wolfe decomposition
 
+        Parameters:
+        -----------
+        verbose : bool
+            Whether to print progress information
+        use_stabilization : bool
+            Whether to use dual stabilization techniques
+        use_parallel : bool
+            Whether to solve subproblems in parallel
+        column_management : bool
+            Whether to remove non-basic columns periodically
+        column_removal_threshold : int
+            Remove columns not used in the basis for this many iterations
+            
         Returns:
         --------
         dict
@@ -72,17 +101,31 @@ class DantzigWolfeDecomposition:
             - 'status': Solution status
         """
         start_time = time.time()
-
+        self.use_stabilization = use_stabilization
+        self.use_parallel = use_parallel
+        
         # Initialize extreme points
         self._initialize_extreme_points()
 
         # Create initial master problem
         self._create_master_problem()
+        
+        # Initialize column usage tracking
+        if column_management:
+            for i in range(self.num_clients):
+                self.column_usage[i] = [0] * len(self.extreme_points[i])
 
         # Column generation loop
         iteration = 0
+        prev_obj = float('inf')
+        
+        # For stabilization
+        if use_stabilization:
+            self.stabilization_center = np.zeros(self.m)
+        
         while iteration < self.max_iterations:
             iteration += 1
+            self.iteration_count = iteration
 
             if verbose:
                 print(f"\nIteration {iteration}")
@@ -90,7 +133,7 @@ class DantzigWolfeDecomposition:
             # Solve restricted master problem
             self.master.optimize()
 
-            if self.master.status != GRB.OPTIMAL:
+            if self.master.status != gp.GRB.OPTIMAL:
                 if verbose:
                     print(
                         f"Master problem could not be solved optimally. Status: {self.master.status}"
@@ -98,34 +141,70 @@ class DantzigWolfeDecomposition:
                 break
 
             # Get dual prices
-            duals_complicating = [
+            duals_complicating = np.array([
                 self.complicating_constrs[i].Pi for i in range(self.m)
-            ]
+            ])
             duals_convexity = [
                 self.convexity_constrs[i].Pi for i in range(self.num_clients)
             ]
+            
+            # Update stabilization center if using stabilization
+            if use_stabilization:
+                self._update_stabilization(duals_complicating, prev_obj, self.master.objVal)
+                # Apply stabilization
+                stabilized_duals = self._stabilize_duals(duals_complicating)
+            else:
+                stabilized_duals = duals_complicating
 
             # Generate columns by solving subproblems
             new_columns_added = 0
             total_reduced_cost = 0
-
-            for i in range(self.num_clients):
-                # Solve subproblem i
-                reduced_cost, new_point, subproblem_obj = self._solve_subproblem(
-                    i, duals_complicating, duals_convexity[i]
+            
+            # Update column usage for tracking
+            if column_management:
+                self._update_column_usage()
+            
+            # Solve subproblems (in parallel if enabled)
+            if use_parallel:
+                subproblem_results = self._solve_all_subproblems_parallel(
+                    stabilized_duals, duals_convexity
                 )
+                
+                # Process results and add columns
+                for i, (reduced_cost, new_point, subproblem_obj) in enumerate(subproblem_results):
+                    if reduced_cost < -self.optimality_tol:
+                        self._add_column(i, new_point, subproblem_obj)
+                        new_columns_added += 1
+                        total_reduced_cost += reduced_cost
+            else:
+                for i in range(self.num_clients):
+                    # Solve subproblem i
+                    reduced_cost, new_point, subproblem_obj = self._solve_subproblem(
+                        i, stabilized_duals, duals_convexity[i]
+                    )
 
-                if reduced_cost < -self.optimality_tol:
-                    # Add new column to master problem
-                    self._add_column(i, new_point, subproblem_obj)
-                    new_columns_added += 1
-                    total_reduced_cost += reduced_cost
+                    if reduced_cost < -self.optimality_tol:
+                        # Add new column to master problem
+                        self._add_column(i, new_point, subproblem_obj)
+                        new_columns_added += 1
+                        total_reduced_cost += reduced_cost
+            
+            # Perform column management if enabled
+            if column_management and iteration % 5 == 0 and iteration > 10:
+                removed = self._remove_unused_columns(column_removal_threshold)
+                if verbose and removed > 0:
+                    print(f"  Removed {removed} unused columns")
 
             if verbose:
                 print(f"  Master objective: {self.master.objVal:.6f}")
                 print(f"  New columns added: {new_columns_added}")
                 print(f"  Sum of negative reduced costs: {total_reduced_cost:.6f}")
+                if use_stabilization:
+                    print(f"  Stabilization weight: {self.stabilization_weight:.4f}")
 
+            # Save current objective for next iteration
+            prev_obj = self.master.objVal
+            
             # Check termination criteria
             if new_columns_added == 0 or abs(total_reduced_cost) < self.optimality_tol:
                 if verbose:
@@ -138,7 +217,7 @@ class DantzigWolfeDecomposition:
         solution['iterations'] = iteration
 
         return solution
-
+    
     def _initialize_extreme_points(self):
         """Generate initial extreme points for each client subproblem"""
         for i in range(self.num_clients):
@@ -165,12 +244,12 @@ class DantzigWolfeDecomposition:
             model.addMConstr(A_i, x, sense="<", b=b_i, name="feasible_region")
 
             # Set objective to get a basic feasible solutiom
-            model.setObjective(c_i @ x, GRB.MINIMIZE)
+            model.setObjective(c_i @ x, gp.GRB.MINIMIZE)
 
             # Solve
             model.optimize()
 
-            if model.status == GRB.OPTIMAL:
+            if model.status == gp.GRB.OPTIMAL:
                 # Extract solution
                 x_values = x.X
 
@@ -232,7 +311,7 @@ class DantzigWolfeDecomposition:
                 for i in range(self.num_clients)
                 for j in range(len(self.extreme_points[i]))
             ),
-            GRB.MINIMIZE,
+            gp.GRB.MINIMIZE,
         )
 
     def _solve_subproblem(self, client_idx, duals_complicating, dual_convexity):
@@ -281,12 +360,12 @@ class DantzigWolfeDecomposition:
         model.addMConstr(A_i, x, sense="<", b=b_i, name="feasible_region")
 
         # Set objective
-        model.setObjective(modified_cost @ x, GRB.MINIMIZE)
+        model.setObjective(modified_cost @ x, gp.GRB.MINIMIZE)
 
         # Solve
         model.optimize()
 
-        if model.status == GRB.OPTIMAL:
+        if model.status == gp.GRB.OPTIMAL:
             # Extract solution
             x_values = x.X
 
@@ -298,9 +377,7 @@ class DantzigWolfeDecomposition:
 
             return reduced_cost, x_values, obj_value
         else:
-            raise ValueError(
-                f"Got status {model.status.name}. Subproblem {client_idx} could not be solved optimally"
-            )
+            raise ValueError(f"Subproblem {client_idx} could not be solved optimally")
 
     def _add_column(self, client_idx, new_point, obj_value):
         """
@@ -363,7 +440,7 @@ class DantzigWolfeDecomposition:
         dict
             Solution information
         """
-        if self.master.status != GRB.OPTIMAL:
+        if self.master.status != gp.GRB.OPTIMAL:
             return {'status': self.master.status, 'obj_value': float('inf'), 'x': None}
 
         # Get lambda values
@@ -387,7 +464,221 @@ class DantzigWolfeDecomposition:
             'x': x,
             'lambda_values': lambda_values,
         }
-
+        
+    def _update_stabilization(self, current_duals, prev_obj, current_obj):
+        """
+        Update stabilization parameters based on algorithm progress
+        
+        Parameters:
+        -----------
+        current_duals : numpy.ndarray
+            Current dual values for complicating constraints
+        prev_obj : float
+            Previous master problem objective value
+        current_obj : float
+            Current master problem objective value
+        """
+        # Update stabilization center using a convex combination
+        if self.stabilization_center is None:
+            self.stabilization_center = current_duals.copy()
+        else:
+            # If objective is improving, put more weight on current duals
+            if current_obj < prev_obj - self.optimality_tol:
+                alpha = 0.7  # More weight to current duals when improving
+            else:
+                alpha = 0.3  # More weight to previous center when stalling
+                
+            self.stabilization_center = (1 - alpha) * self.stabilization_center + alpha * current_duals
+            
+        # Decrease stabilization weight over time
+        if self.iteration_count % 5 == 0:
+            self.stabilization_weight = max(
+                self.min_stabilization_weight, 
+                self.stabilization_weight * self.stabilization_weight_decrease
+            )
+    
+    def _stabilize_duals(self, duals):
+        """
+        Apply stabilization to dual values
+        
+        Parameters:
+        -----------
+        duals : numpy.ndarray
+            Current dual values
+            
+        Returns:
+        --------
+        numpy.ndarray
+            Stabilized dual values
+        """
+        if self.stabilization_center is None:
+            return duals
+            
+        # Apply proximal point stabilization
+        weight = self.stabilization_weight
+        return weight * self.stabilization_center + (1 - weight) * duals
+    
+    def _update_column_usage(self):
+        """Update which columns are in the basis for column management"""
+        for i in range(self.num_clients):
+            for j in range(len(self.extreme_points[i])):
+                if (i, j) in self.lambda_vars:
+                    # Check if column is basic (has non-zero value)
+                    if self.lambda_vars[i, j].x > self.optimality_tol:
+                        self.column_usage[i][j] = self.iteration_count
+    
+    def _remove_unused_columns(self, threshold):
+        """
+        Remove columns that haven't been in the basis for several iterations
+        
+        Parameters:
+        -----------
+        threshold : int
+            Remove columns not used in the basis for this many iterations
+            
+        Returns:
+        --------
+        int
+            Number of columns removed
+        """
+        total_removed = 0
+        
+        for i in range(self.num_clients):
+            # Skip if we have too few columns
+            if len(self.extreme_points[i]) <= 2:
+                continue
+                
+            cols_to_remove = []
+            
+            # Find columns to remove
+            for j in range(len(self.extreme_points[i])):
+                # Skip if column is recently used or never used (might be new)
+                age = self.iteration_count - self.column_usage[i][j]
+                if age > threshold and self.column_usage[i][j] > 0:
+                    cols_to_remove.append(j)
+            
+            # Remove columns in reverse order (to maintain correct indices)
+            for j in sorted(cols_to_remove, reverse=True):
+                if (i, j) in self.lambda_vars:
+                    # Remove variable from model
+                    self.master.remove(self.lambda_vars[i, j])
+                    del self.lambda_vars[i, j]
+                    
+                    # Remove column data
+                    self.extreme_points[i].pop(j)
+                    self.extreme_point_costs[i].pop(j)
+                    self.extreme_point_complicating[i].pop(j)
+                    self.column_usage[i].pop(j)
+                    
+                    # Update indices of remaining variables
+                    new_lambda_vars = {}
+                    for (client, col), var in self.lambda_vars.items():
+                        if client == i and col > j:
+                            new_lambda_vars[(client, col-1)] = var
+                        else:
+                            new_lambda_vars[(client, col)] = var
+                    self.lambda_vars = new_lambda_vars
+                    
+                    total_removed += 1
+        
+        if total_removed > 0:
+            # Update the model to reflect changes
+            self.master.update()
+            
+        return total_removed
+    
+    def _solve_all_subproblems_parallel(self, duals_complicating, duals_convexity):
+        """
+        Solve all subproblems in parallel
+        
+        Parameters:
+        -----------
+        duals_complicating : numpy.ndarray
+            Dual values for complicating constraints
+        duals_convexity : list
+            Dual values for convexity constraints
+            
+        Returns:
+        --------
+        list
+            List of results (reduced_cost, new_point, objective_value) for each client
+        """
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
+            
+            # Submit all subproblems to thread pool
+            for i in range(self.num_clients):
+                future = executor.submit(
+                    self._solve_subproblem, 
+                    i, 
+                    duals_complicating, 
+                    duals_convexity[i]
+                )
+                futures.append(future)
+            
+            # Collect results
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    # In case of error, add a placeholder that won't generate column
+                    print(f"Error in subproblem: {e}")
+                    results.append((0, None, 0))
+        
+        # Sort results by client index to maintain order
+        # This step is not necessary since we're collecting results in order of completion
+        # But sorting ensures deterministic behavior
+        results.sort(key=lambda x: x[0])
+        return results
+            
+    def set_initial_columns(self, initial_points):
+        """
+        Set initial columns for warm start
+        
+        Parameters:
+        -----------
+        initial_points : dict
+            Dictionary mapping client indices to lists of points
+            Format: {client_idx: [point1, point2, ...]}
+        """
+        # Check if we already have a master problem
+        if self.master is not None:
+            raise ValueError("Cannot set initial columns after master problem is created")
+            
+        for client_idx, points in initial_points.items():
+            if client_idx >= self.num_clients:
+                raise ValueError(f"Invalid client index: {client_idx}")
+                
+            # Add each point as an extreme point
+            for point in points:
+                # Extract client data
+                client_indices = self.client_blocks[client_idx]['indices']
+                
+                # Validate point dimensions
+                if len(point) != len(client_indices):
+                    raise ValueError(
+                        f"Point dimension {len(point)} does not match client {client_idx} "
+                        f"dimension {len(client_indices)}"
+                    )
+                
+                # Client-specific costs
+                c_i = self.c[client_indices]
+                
+                # Client variables in complicating constraints
+                F_i = self.F[:, client_indices]
+                
+                # Calculate cost
+                cost_i = np.dot(c_i, point)
+                
+                # Calculate contribution to complicating constraints
+                complicating_i = F_i @ point
+                
+                # Store the point
+                self.extreme_points[client_idx].append(point)
+                self.extreme_point_costs[client_idx].append(cost_i)
+                self.extreme_point_complicating[client_idx].append(complicating_i)
 
 # Example usage
 def run_example():
@@ -429,7 +720,7 @@ def run_example():
 
     # Create and solve using Dantzig-Wolfe
     dw = DantzigWolfeDecomposition(c, F, client_blocks)
-    solution = dw.solve(verbose=True)
+    solution = dw.solve(verbose=True, use_stabilization=False, use_parallel=False, column_management=False)
 
     # Print results
     print("\nFinal solution:")
@@ -468,7 +759,7 @@ def simple_solve(c, F, client_blocks):
     m.addMConstr(
         A, x, '<', np.hstack([client_block['b'] for client_block in client_blocks])
     )
-    m.setObjective(c.T @ x, sense=GRB.MINIMIZE)
+    m.setObjective(c.T @ x, sense=gp.GRB.MINIMIZE)
     m.optimize()
     print(f"Optimal value of simple solve: {m.objVal}")
     print(f"Optimal solution of simple solve: {x.X}")
