@@ -1,16 +1,19 @@
 """
 Main implementation of Dantzig-Wolfe decomposition for block-angular structured problems.
 """
-import numpy as np
 import time
+from typing import Any, Optional
 
+import numpy as np
+import numpy.typing as npt
 from dantzig_wolfe.master_problem import MasterProblemManager
 from dantzig_wolfe.subproblem import SubproblemSolver
+
 
 class DantzigWolfeDecomposition:
     """
     Implementation of Dantzig-Wolfe decomposition for block-angular structured problems
-        
+
     Problem structure:
     min c.T @ x
     s.t. F @ x = 0  (complicating constraints)
@@ -18,7 +21,14 @@ class DantzigWolfeDecomposition:
         lb_i <= x_i <= ub_i for each client i
     """
 
-    def __init__(self, c, F, client_blocks, max_iterations=100, optimality_tol=1e-6):
+    def __init__(
+        self,
+        c: npt.ArrayLike,
+        F: npt.ArrayLike,
+        client_blocks: list[dict[str, npt.ArrayLike]],
+        max_iterations: int = 100,
+        optimality_tol: float = 1e-6,
+    ) -> None:
         """
         Initialize the Dantzig-Wolfe decomposition solver
 
@@ -40,43 +50,56 @@ class DantzigWolfeDecomposition:
         optimality_tol : float
             Optimality tolerance
         """
-        self.c = c
-        self.F = F
-        self.client_blocks = client_blocks
-        self.num_clients = len(client_blocks)
-        self.max_iterations = max_iterations
-        self.optimality_tol = optimality_tol
+        self.c: npt.ArrayLike = c
+        self.F: npt.ArrayLike = F
+        self.client_blocks: list[dict[str, npt.ArrayLike]] = client_blocks
+        self.num_clients: int = len(client_blocks)
+        self.max_iterations: int = max_iterations
+        self.optimality_tol: float = optimality_tol
 
         # Verify dimensions
-        self.n = c.shape[0]  # Total number of variables
-        self.m = F.shape[0]  # Number of complicating constraints
+        self.n: int = c.shape[0]  # Total number of variables
+        self.m: int = F.shape[0]  # Number of complicating constraints
 
         # Initialize storage for extreme points
-        self.extreme_points = [[] for _ in range(self.num_clients)]
-        self.extreme_point_costs = [[] for _ in range(self.num_clients)]
-        self.extreme_point_complicating = [[] for _ in range(self.num_clients)]
-        
+        self.extreme_points: list[list[npt.ArrayLike]] = [
+            [] for _ in range(self.num_clients)
+        ]
+        self.extreme_point_costs: list[list[float]] = [
+            [] for _ in range(self.num_clients)
+        ]
+        self.extreme_point_complicating: list[list[npt.ArrayLike]] = [
+            [] for _ in range(self.num_clients)
+        ]
+
         # Track column usage for column management
-        self.column_usage = [[] for _ in range(self.num_clients)]
-        self.iteration_count = 0
-        
+        self.column_usage: list[list[int]] = [[] for _ in range(self.num_clients)]
+        self.iteration_count: int = 0
+
         # Stabilization parameters
-        self.use_stabilization = True
-        self.stabilization_center = None
-        self.stabilization_weight = 0.5
-        self.stabilization_weight_decrease = 0.9
-        self.min_stabilization_weight = 0.01
-        
+        self.use_stabilization: bool = True
+        self.stabilization_center: Optional[npt.ArrayLike] = None
+        self.stabilization_weight: float = 0.5
+        self.stabilization_weight_decrease: float = 0.9
+        self.min_stabilization_weight: float = 0.01
+
         # Parallel processing parameters
-        self.use_parallel = True
-        self.max_workers = None  # None means the default (CPU count)
+        self.use_parallel: bool = True
+        self.max_workers: Optional[int] = None  # None means the default (CPU count)
 
         # Initialize problem managers
-        self.master_manager = None
-        self.subproblem_solver = SubproblemSolver(c, F, client_blocks, optimality_tol)
+        self.subproblem_solver: SubproblemSolver = SubproblemSolver(
+            c, F, client_blocks, optimality_tol
+        )
 
-    def solve(self, verbose=True, use_stabilization=True, use_parallel=True, 
-              column_management=True, column_removal_threshold=5):
+    def solve(
+        self,
+        verbose: bool = True,
+        use_stabilization: bool = True,
+        use_parallel: bool = True,
+        column_management: bool = True,
+        column_removal_threshold: int = 5,
+    ) -> dict[str, Any]:
         """
         Solve the problem using Dantzig-Wolfe decomposition
 
@@ -92,7 +115,7 @@ class DantzigWolfeDecomposition:
             Whether to remove non-basic columns periodically
         column_removal_threshold : int
             Remove columns not used in the basis for this many iterations
-            
+
         Returns:
         --------
         dict
@@ -103,35 +126,35 @@ class DantzigWolfeDecomposition:
             - 'time': Solution time
             - 'status': Solution status
         """
-        start_time = time.time()
+        start_time: float = time.time()
         self.use_stabilization = use_stabilization
         self.use_parallel = use_parallel
-        
+
         # Initialize extreme points
         self._initialize_extreme_points()
 
         # Create initial master problem
         self.master_manager = MasterProblemManager(
-            self.num_clients, 
-            self.m, 
+            self.num_clients,
+            self.m,
             self.extreme_points,
             self.extreme_point_costs,
-            self.extreme_point_complicating
+            self.extreme_point_complicating,
         )
-        
+
         # Initialize column usage tracking
         if column_management:
             for i in range(self.num_clients):
                 self.column_usage[i] = [0] * len(self.extreme_points[i])
 
         # Column generation loop
-        iteration = 0
-        prev_obj = float('inf')
-        
+        iteration: int = 0
+        prev_obj: float = float("inf")
+
         # For stabilization
         if use_stabilization:
             self.stabilization_center = np.zeros(self.m)
-        
+
         while iteration < self.max_iterations:
             iteration += 1
             self.iteration_count = iteration
@@ -144,12 +167,12 @@ class DantzigWolfeDecomposition:
 
             if not status:
                 if verbose:
-                    print(f"Master problem could not be solved optimally.")
+                    print("Master problem could not be solved optimally.")
                 break
 
             # Get dual prices
             duals_complicating, duals_convexity = self.master_manager.get_dual_values()
-            
+
             # Update stabilization center if using stabilization
             if use_stabilization:
                 self._update_stabilization(duals_complicating, prev_obj, obj_val)
@@ -160,20 +183,17 @@ class DantzigWolfeDecomposition:
 
             # Generate columns by solving subproblems
             new_columns_added = 0
-            total_reduced_cost = 0
-            
+            total_reduced_cost = 0.0
+
             # Update column usage for tracking
             if column_management:
                 self._update_column_usage()
-            
+
             # Solve subproblems
             subproblem_results = self.subproblem_solver.solve_all_subproblems(
-                stabilized_duals, 
-                duals_convexity,
-                use_parallel,
-                self.max_workers
+                stabilized_duals, duals_convexity, use_parallel, self.max_workers
             )
-            
+
             # Process results and add columns
             for i, result in enumerate(subproblem_results):
                 if result is not None:
@@ -182,10 +202,10 @@ class DantzigWolfeDecomposition:
                         self._add_column(i, new_point, subproblem_obj)
                         new_columns_added += 1
                         total_reduced_cost += reduced_cost
-            
+
             # Perform column management if enabled
             if column_management and iteration % 5 == 0 and iteration > 10:
-                removed = self._remove_unused_columns(column_removal_threshold)
+                removed: int = self._remove_unused_columns(column_removal_threshold)
                 if verbose and removed > 0:
                     print(f"  Removed {removed} unused columns")
 
@@ -198,7 +218,7 @@ class DantzigWolfeDecomposition:
 
             # Save current objective for next iteration
             prev_obj = obj_val
-            
+
             # Check termination criteria
             if new_columns_added == 0 or abs(total_reduced_cost) < self.optimality_tol:
                 if verbose:
@@ -207,15 +227,17 @@ class DantzigWolfeDecomposition:
 
         # Construct solution
         solution = self._construct_solution()
-        solution['time'] = time.time() - start_time
-        solution['iterations'] = iteration
+        solution["time"] = time.time() - start_time
+        solution["iterations"] = iteration
 
         return solution
-        
-    def _update_stabilization(self, current_duals, prev_obj, current_obj):
+
+    def _update_stabilization(
+        self, current_duals: npt.ArrayLike, prev_obj: float, current_obj: float
+    ) -> None:
         """
         Update stabilization parameters based on algorithm progress
-        
+
         Parameters:
         -----------
         current_duals : numpy.ndarray
@@ -230,29 +252,28 @@ class DantzigWolfeDecomposition:
             self.stabilization_center = current_duals.copy()
         else:
             # If objective is improving, put more weight on current duals
-            if current_obj < prev_obj - self.optimality_tol:
-                alpha = 0.7  # More weight to current duals when improving
-            else:
-                alpha = 0.3  # More weight to previous center when stalling
-                
-            self.stabilization_center = (1 - alpha) * self.stabilization_center + alpha * current_duals
-            
+            # Otherwise, put more weight on the previous center when stalling
+            alpha = 0.7 if current_obj < (prev_obj - self.optimality_tol) else 0.3
+            self.stabilization_center = (
+                1 - alpha
+            ) * self.stabilization_center + alpha * current_duals
+
         # Decrease stabilization weight over time
         if self.iteration_count % 5 == 0:
             self.stabilization_weight = max(
-                self.min_stabilization_weight, 
-                self.stabilization_weight * self.stabilization_weight_decrease
+                self.min_stabilization_weight,
+                self.stabilization_weight * self.stabilization_weight_decrease,
             )
-    
-    def _stabilize_duals(self, duals):
+
+    def _stabilize_duals(self, duals: npt.ArrayLike) -> npt.ArrayLike:
         """
         Apply stabilization to dual values
-        
+
         Parameters:
         -----------
         duals : numpy.ndarray
             Current dual values
-            
+
         Returns:
         --------
         numpy.ndarray
@@ -260,125 +281,137 @@ class DantzigWolfeDecomposition:
         """
         if self.stabilization_center is None:
             return duals
-            
+
         # Apply proximal point stabilization
-        weight = self.stabilization_weight
+        weight: float = self.stabilization_weight
         return weight * self.stabilization_center + (1 - weight) * duals
-    
-    def _update_column_usage(self):
+
+    def _update_column_usage(self) -> None:
         """Update which columns are in the basis for column management"""
-        lambda_values = self.master_manager.get_lambda_values()
-        
+        lambda_values: dict[
+            tuple[int, int], float
+        ] = self.master_manager.get_lambda_values()
+
         for i in range(self.num_clients):
             for j in range(len(self.extreme_points[i])):
-                if (i, j) in lambda_values and lambda_values[i, j] > self.optimality_tol:
+                if (i, j) in lambda_values and lambda_values[
+                    i, j
+                ] > self.optimality_tol:
                     self.column_usage[i][j] = self.iteration_count
-    
-    def _remove_unused_columns(self, threshold):
+
+    def _remove_unused_columns(self, threshold: int) -> int:
         """
         Remove columns that haven't been in the basis for several iterations
-        
+
         Parameters:
         -----------
         threshold : int
             Remove columns not used in the basis for this many iterations
-            
+
         Returns:
         --------
         int
             Number of columns removed
         """
-        total_removed = 0
-        
+        total_removed: int = 0
+
         for i in range(self.num_clients):
             # Skip if we have too few columns
             if len(self.extreme_points[i]) <= 2:
                 continue
-                
-            cols_to_remove = []
-            
+
+            cols_to_remove: list[int] = []
+
             # Find columns to remove
             for j in range(len(self.extreme_points[i])):
                 # Skip if column is recently used or never used (might be new)
-                age = self.iteration_count - self.column_usage[i][j]
+                age: int = self.iteration_count - self.column_usage[i][j]
                 if age > threshold and self.column_usage[i][j] > 0:
                     cols_to_remove.append(j)
-            
+
             # Remove columns in reverse order (to maintain correct indices)
             if cols_to_remove:
                 # Call the master problem manager to handle the column removal
-                removed = self.master_manager.remove_columns(i, cols_to_remove)
-                
+                removed: int = self.master_manager.remove_columns(i, cols_to_remove)
+
                 # Update our tracking data structures
                 for j in sorted(cols_to_remove, reverse=True):
                     self.extreme_points[i].pop(j)
                     self.extreme_point_costs[i].pop(j)
                     self.extreme_point_complicating[i].pop(j)
                     self.column_usage[i].pop(j)
-                
+
                 total_removed += removed
-        
+
         return total_removed
-            
-    def set_initial_columns(self, initial_points):
+
+    def set_initial_columns(
+        self, initial_points: dict[int, list[npt.ArrayLike]]
+    ) -> None:
         """
         Set initial columns for warm start
-        
+
         Parameters:
         -----------
         initial_points : dict
-            Dictionary mapping client indices to lists of points
+            dictionary mapping client indices to lists of points
             Format: {client_idx: [point1, point2, ...]}
         """
         # Check if we already have initialized the master problem
         if self.master_manager is not None:
-            raise ValueError("Cannot set initial columns after master problem is created")
-            
+            raise ValueError(
+                "Cannot set initial columns after master problem is created"
+            )
+
         for client_idx, points in initial_points.items():
             if client_idx >= self.num_clients:
                 raise ValueError(f"Invalid client index: {client_idx}")
-                
+
             # Add each point as an extreme point
             for point in points:
                 # Extract client data
-                client_indices = self.client_blocks[client_idx]['indices']
-                
+                client_indices: npt.ArrayLike = self.client_blocks[client_idx][
+                    "indices"
+                ]
+
                 # Validate point dimensions
                 if len(point) != len(client_indices):
                     raise ValueError(
                         f"Point dimension {len(point)} does not match client {client_idx} "
                         f"dimension {len(client_indices)}"
                     )
-                
+
                 # Client-specific costs
                 c_i = self.c[client_indices]
-                
+
                 # Client variables in complicating constraints
                 F_i = self.F[:, client_indices]
-                
+
                 # Calculate cost
-                cost_i = np.dot(c_i, point)
-                
+                cost_i: float = float(np.dot(c_i, point))
+
                 # Calculate contribution to complicating constraints
                 complicating_i = F_i @ point
-                
+
                 # Store the point
                 self.extreme_points[client_idx].append(point)
                 self.extreme_point_costs[client_idx].append(cost_i)
                 self.extreme_point_complicating[client_idx].append(complicating_i)
 
-    def _initialize_extreme_points(self):
+    def _initialize_extreme_points(self) -> None:
         """Generate initial extreme points for each client subproblem"""
         for i in range(self.num_clients):
             # Let the subproblem solver handle generation of initial points
             point, cost, complicating = self.subproblem_solver.generate_initial_point(i)
-            
+
             # Store the point
             self.extreme_points[i].append(point)
             self.extreme_point_costs[i].append(cost)
             self.extreme_point_complicating[i].append(complicating)
 
-    def _add_column(self, client_idx, new_point, obj_value):
+    def _add_column(
+        self, client_idx: int, new_point: npt.ArrayLike, obj_value: float
+    ) -> None:
         """
         Add a new column to the master problem
 
@@ -396,24 +429,19 @@ class DantzigWolfeDecomposition:
         self.extreme_point_costs[client_idx].append(obj_value)
 
         # Calculate contribution to complicating constraints
-        client_indices = self.client_blocks[client_idx]['indices']
+        client_indices: npt.ArrayLike = self.client_blocks[client_idx]["indices"]
         F_i = self.F[:, client_indices]
         complicating_contribution = F_i @ new_point
         self.extreme_point_complicating[client_idx].append(complicating_contribution)
 
         # Add to master problem
-        self.master_manager.add_column(
-            client_idx, 
-            new_point, 
-            obj_value, 
-            complicating_contribution
-        )
-        
+        self.master_manager.add_column(client_idx, obj_value, complicating_contribution)
+
         # Add the new column to column usage tracking
         if len(self.column_usage) > client_idx:
             self.column_usage[client_idx].append(0)
 
-    def _construct_solution(self):
+    def _construct_solution(self) -> dict[str, Any]:
         """
         Construct the original space solution from the master problem solution
 
@@ -422,25 +450,27 @@ class DantzigWolfeDecomposition:
         dict
             Solution information
         """
-        status, obj_val = self.master_manager.get_status_and_objective()
-        if not status:
-            return {'status': "Not Optimal", 'obj_value': float('inf'), 'x': None}
+        is_optimal, obj_val = self.master_manager.get_status_and_objective()
+        if not is_optimal:
+            return {"status": "Not Optimal", "obj_value": float("inf"), "x": None}
 
         # Get lambda values
-        lambda_values = self.master_manager.get_lambda_values()
+        lambda_values: dict[
+            tuple[int, int], float
+        ] = self.master_manager.get_lambda_values()
 
         # Construct solution in original space
-        x = np.zeros(self.n)
+        x: npt.ArrayLike = np.zeros(self.n)
         for i in range(self.num_clients):
-            client_indices = self.client_blocks[i]['indices']
+            client_indices: npt.ArrayLike = self.client_blocks[i]["indices"]
             for j, point in enumerate(self.extreme_points[i]):
-                lambda_val = lambda_values.get((i, j), 0)
+                lambda_val: float = lambda_values.get((i, j), 0)
                 if lambda_val > 1e-10:
                     x[client_indices] += lambda_val * point
 
         return {
-            'status': "Optimal",
-            'obj_value': obj_val,
-            'x': x,
-            'lambda_values': lambda_values,
+            "status": "Optimal",
+            "obj_value": obj_val,
+            "x": x,
+            "lambda_values": lambda_values,
         }

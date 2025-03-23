@@ -1,22 +1,30 @@
 """
 Master problem implementation for Dantzig-Wolfe decomposition.
 """
-import numpy as np
 import gurobipy as gp
+import numpy as np
+import numpy.typing as npt
 from gurobipy import GRB
 
 
 class MasterProblemManager:
     """
     Manages the restricted master problem for Dantzig-Wolfe decomposition.
-    
+
     Handles creation, solving, and updating of the master problem.
     """
-    
-    def __init__(self, num_clients, m, extreme_points, extreme_point_costs, extreme_point_complicating):
+
+    def __init__(
+        self,
+        num_clients: int,
+        m: int,
+        extreme_points: list[list[npt.ArrayLike]],
+        extreme_point_costs: list[list[float]],
+        extreme_point_complicating: list[list[npt.ArrayLike]],
+    ):
         """
         Initialize the master problem
-        
+
         Parameters:
         -----------
         num_clients : int
@@ -35,13 +43,13 @@ class MasterProblemManager:
         self.extreme_points = extreme_points
         self.extreme_point_costs = extreme_point_costs
         self.extreme_point_complicating = extreme_point_complicating
-        
+
         # Create the master problem
         self.master = gp.Model()
-        self.master.setParam('OutputFlag', 0)
+        self.master.setParam("OutputFlag", 0)
 
         # Create lambda variables for each extreme point as a 2D dictionary
-        self.lambda_vars = {}
+        self.lambda_vars: dict[tuple[int, int], gp.Var] = {}
         for i in range(self.num_clients):
             for j in range(len(extreme_points[i])):
                 var_name = f"lambda[{i},{j}]"
@@ -83,92 +91,97 @@ class MasterProblemManager:
             GRB.MINIMIZE,
         )
 
-    def solve_master(self):
+    def solve_master(self) -> tuple[bool, float]:
         """
         Solve the master problem
-        
+
         Returns:
         --------
         tuple
             (is_optimal, objective_value)
         """
         self.master.optimize()
-        
-        is_optimal = (self.master.status == GRB.OPTIMAL)
-        obj_val = self.master.objVal if is_optimal else float('inf')
-        
+
+        is_optimal = self.master.Status == GRB.OPTIMAL
+        obj_val = self.master.ObjVal if is_optimal else float("inf")
+
         return is_optimal, obj_val
-    
-    def get_dual_values(self):
+
+    def get_dual_values(self) -> tuple[npt.ArrayLike, list[float]]:
         """
         Get dual values from the master problem
-        
+
         Returns:
         --------
         tuple
             (duals_complicating, duals_convexity)
         """
         # Get dual prices for complicating constraints
-        duals_complicating = np.array([
-            self.complicating_constrs[i].Pi for i in range(self.m)
-        ])
-        
+        duals_complicating = np.array(
+            [self.complicating_constrs[i].Pi for i in range(self.m)]
+        )
+
         # Get dual prices for convexity constraints
         duals_convexity = [
             self.convexity_constrs[i].Pi for i in range(self.num_clients)
         ]
-        
+
         return duals_complicating, duals_convexity
-    
-    def get_lambda_values(self):
+
+    def get_lambda_values(self) -> dict[tuple[int, int], float]:
         """
         Get the values of lambda variables
-        
+
         Returns:
         --------
         dict
             Dictionary mapping (client_idx, col_idx) to lambda values
         """
         lambda_values = {}
-        
+
         for i in range(self.num_clients):
             for j in range(len(self.extreme_points[i])):
                 if (i, j) in self.lambda_vars:
-                    lambda_values[(i, j)] = self.lambda_vars[i, j].x
-        
+                    lambda_values[(i, j)] = self.lambda_vars[i, j].X
+
         return lambda_values
-    
-    def get_status_and_objective(self):
+
+    def get_status_and_objective(self) -> tuple[bool, float]:
         """
         Get the solution status and objective value
-        
+
         Returns:
         --------
         tuple
             (is_optimal, objective_value)
         """
-        is_optimal = (self.master.status == GRB.OPTIMAL)
-        obj_val = self.master.objVal if is_optimal else float('inf')
-        
+        is_optimal = self.master.Status == GRB.OPTIMAL
+        obj_val = self.master.ObjVal if is_optimal else float("inf")
+
         return is_optimal, obj_val
-    
-    def add_column(self, client_idx, new_point, obj_value, complicating_contribution):
+
+    def add_column(
+        self,
+        client_idx: int,
+        obj_value: float,
+        complicating_contribution: npt.ArrayLike,
+    ) -> None:
         """
         Add a new column to the master problem
-        
+
         Parameters:
         -----------
         client_idx : int
             Client index
-        new_point : numpy.ndarray
-            New extreme point
         obj_value : float
             Objective value contribution
         complicating_contribution : numpy.ndarray
             Contribution to complicating constraints
         """
         # Add new lambda variable to master problem
-        col_idx = len(self.extreme_points[client_idx]) - 1  # Index of the newly added point
+        col_idx = (
+            len(self.extreme_points[client_idx]) - 1
+        )  # Index of the newly added point
         var_name = f"lambda_{client_idx}_{col_idx}"
         self.lambda_vars[client_idx, col_idx] = self.master.addVar(lb=0, name=var_name)
 
@@ -191,49 +204,47 @@ class MasterProblemManager:
 
         # Update objective
         self.master.chgCoeff(
-            self.master.getObjective(), 
-            self.lambda_vars[client_idx, col_idx], 
-            obj_value
+            self.master.getObjective(), self.lambda_vars[client_idx, col_idx], obj_value
         )
-    
-    def remove_columns(self, client_idx, cols_to_remove):
+
+    def remove_columns(self, client_idx: int, cols_to_remove: list[int]) -> int:
         """
         Remove columns from the master problem
-        
+
         Parameters:
         -----------
         client_idx : int
             Client index
-        cols_to_remove : list
+        cols_to_remove : list of int
             List of column indices to remove
-            
+
         Returns:
         --------
         int
             Number of columns actually removed
         """
         removed = 0
-        
+
         # Remove columns in reverse order (to maintain correct indices)
         for j in sorted(cols_to_remove, reverse=True):
             if (client_idx, j) in self.lambda_vars:
                 # Remove variable from model
                 self.master.remove(self.lambda_vars[client_idx, j])
                 del self.lambda_vars[client_idx, j]
-                
+
                 # Update indices of remaining variables
                 new_lambda_vars = {}
                 for (client, col), var in self.lambda_vars.items():
                     if client == client_idx and col > j:
-                        new_lambda_vars[(client, col-1)] = var
+                        new_lambda_vars[(client, col - 1)] = var
                     else:
                         new_lambda_vars[(client, col)] = var
                 self.lambda_vars = new_lambda_vars
-                
+
                 removed += 1
-        
+
         if removed > 0:
             # Update the model to reflect changes
             self.master.update()
-            
+
         return removed
