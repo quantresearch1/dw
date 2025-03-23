@@ -35,17 +35,19 @@ def direct_solve(c, F, client_blocks):
     
     # Concatenate b vectors
     b = np.hstack([client_block['b'] for client_block in client_blocks])
+    lb =  np.hstack([client_block['lb'] for client_block in client_blocks])
+    ub =  np.hstack([client_block['ub'] for client_block in client_blocks])
     
     # Create and solve the model
     model = gp.Model()
     model.setParam('OutputFlag', 0)
     
     # Add variables
-    x = model.addMVar(c.shape[0], lb=0.0)
+    x = model.addMVar(c.shape[0], lb=lb, ub=ub)
     
     # Add constraints
     model.addMConstr(F, x, "=", np.zeros(F.shape[0]))
-    model.addMConstr(A, x, '<', b)
+    model.addMConstr(A, x, '=', b)
     
     # Set objective
     model.setObjective(c @ x, sense=GRB.MINIMIZE)
@@ -54,16 +56,18 @@ def direct_solve(c, F, client_blocks):
     model.optimize()
     
     # Return solution
-    if model.status == GRB.OPTIMAL:
+    if model.Status == GRB.OPTIMAL:
         return {
             'status': 'Optimal',
-            'obj_value': model.objVal,
+            'obj_value': model.ObjVal,
             'x': x.X,
             'solve_time': model.Runtime
         }
-    else:
+    elif model.Status == GRB.INFEASIBLE:
+        model.computeIIS()
+        model.write("test.ilp")
         return {
-            'status': f'Not optimal: {model.status}',
+            'status': f'Not optimal: {model.Status}',
             'obj_value': float('inf'),
             'x': None,
             'solve_time': model.Runtime

@@ -29,6 +29,8 @@ class SubproblemSolver:
             - 'A': Constraint matrix for client i
             - 'b': RHS vector for client i
             - 'indices': Indices of variables for client i
+            - 'lb': Lower bounds for variables in this client block
+            - 'ub': Upper bounds for variables in this client block
         optimality_tol : float
             Optimality tolerance
         """
@@ -56,6 +58,8 @@ class SubproblemSolver:
         client_indices = self.client_blocks[client_idx]['indices']
         A_i = self.client_blocks[client_idx]['A']
         b_i = self.client_blocks[client_idx]['b']
+        lb_i = self.client_blocks[client_idx]['lb']
+        ub_i = self.client_blocks[client_idx]['ub']
 
         # Client-specific costs
         c_i = self.c[client_indices]
@@ -67,12 +71,11 @@ class SubproblemSolver:
         model = gp.Model()
         model.setParam('OutputFlag', 0)
 
-        # Add variables
-        n_i = len(client_indices)
-        x = model.addMVar(n_i, lb=0, name="x")
+        # Add variables with appropriate bounds
+        x = model.addMVar(shape=len(client_indices), lb=lb_i, ub=ub_i, name="x")
 
-        # Add constraints
-        model.addMConstr(A_i, x, sense="<", b=b_i, name="feasible_region")
+        # Add equality constraints instead of inequality
+        model.addMConstr(A_i, x, sense="=", b=b_i, name="feasible_region")
 
         # Set objective to get a basic feasible solution
         model.setObjective(c_i @ x, GRB.MINIMIZE)
@@ -92,7 +95,8 @@ class SubproblemSolver:
             
             return x_values, cost_i, complicating_i
         else:
-            raise ValueError(f"Could not find initial extreme point for client {client_idx}")
+            # If no solution is found, the system might be infeasible
+            raise ValueError(f"Could not find initial extreme point for client {client_idx}. Status: {model.status}")
     
     def solve_subproblem(self, client_idx, duals_complicating, dual_convexity):
         """
@@ -116,6 +120,8 @@ class SubproblemSolver:
         client_indices = self.client_blocks[client_idx]['indices']
         A_i = self.client_blocks[client_idx]['A']
         b_i = self.client_blocks[client_idx]['b']
+        lb_i = self.client_blocks[client_idx]['lb']
+        ub_i = self.client_blocks[client_idx]['ub']
 
         # Client-specific costs
         c_i = self.c[client_indices]
@@ -132,12 +138,11 @@ class SubproblemSolver:
         model = gp.Model()
         model.setParam('OutputFlag', 0)
 
-        # Add variables
-        n_i = len(client_indices)
-        x = model.addMVar(n_i, lb=0, name="x")
+        # Add variables with appropriate bounds
+        x = model.addMVar(shape=len(client_indices), lb=lb_i, ub=ub_i, name="x")
 
-        # Add constraints
-        model.addMConstr(A_i, x, sense="<", b=b_i, name="feasible_region")
+        # Add equality constraints
+        model.addMConstr(A_i, x, sense="=", b=b_i, name="feasible_region")
 
         # Set objective
         model.setObjective(modified_cost @ x, GRB.MINIMIZE)
@@ -157,7 +162,7 @@ class SubproblemSolver:
 
             return reduced_cost, x_values, obj_value
         else:
-            raise ValueError(f"Subproblem {client_idx} could not be solved optimally")
+            raise ValueError(f"Subproblem {client_idx} could not be solved optimally. Status: {model.status}")
     
     def solve_all_subproblems(self, duals_complicating, duals_convexity, use_parallel=True, max_workers=None):
         """

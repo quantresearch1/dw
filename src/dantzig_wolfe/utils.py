@@ -59,6 +59,8 @@ def validate_problem_structure(c, F, client_blocks):
             raise ValueError(f"Client block {i} missing 'indices'")
         if 'A' not in block or 'b' not in block:
             raise ValueError(f"Client block {i} missing 'A' or 'b'")
+        if 'lb' not in block or 'ub' not in block:
+            raise ValueError(f"Client block {i} missing 'lb' or 'ub'")
             
         indices = block['indices']
         
@@ -84,6 +86,20 @@ def validate_problem_structure(c, F, client_blocks):
         if A_i.shape[0] != b_i.shape[0]:
             raise ValueError(
                 f"Client block {i}: A has {A_i.shape[0]} rows but b has {b_i.shape[0]} elements"
+            )
+        
+        # Check bounds dimensions
+        lb_i = block['lb']
+        ub_i = block['ub']
+        
+        if len(lb_i) != len(indices):
+            raise ValueError(
+                f"Client block {i}: lb has {len(lb_i)} elements but indices has {len(indices)} elements"
+            )
+        
+        if len(ub_i) != len(indices):
+            raise ValueError(
+                f"Client block {i}: ub has {len(ub_i)} elements but indices has {len(indices)} elements"
             )
     
     # Check that all variables are covered
@@ -134,7 +150,7 @@ def verify_solution(c, F, client_blocks, x, tol=1e-6):
         result['is_feasible'] = False
         result['violations']['complicating'] = complicating_violation
     
-    # Check client block constraints: A_i @ x_i <= b_i
+    # Check client block constraints: A_i @ x_i = b_i (equality constraints)
     for i, block in enumerate(client_blocks):
         indices = block['indices']
         A_i = block['A']
@@ -143,13 +159,30 @@ def verify_solution(c, F, client_blocks, x, tol=1e-6):
         x_i = x[indices]
         constraint_values = A_i @ x_i
         
-        if not np.all(constraint_values <= b_i + tol):
+        # Check for equality constraint satisfaction
+        if not np.allclose(constraint_values, b_i, atol=tol):
             result['is_feasible'] = False
-            result['violations'][f'client_{i}'] = np.maximum(0, constraint_values - b_i)
+            result['violations'][f'client_{i}'] = constraint_values - b_i
     
-    # Check non-negativity: x >= 0
-    if not np.all(x >= -tol):
-        result['is_feasible'] = False
-        result['violations']['non_negativity'] = np.minimum(0, x)
+    # Check variable bounds
+    for i, block in enumerate(client_blocks):
+        indices = block['indices']
+        x_i = x[indices]
+        
+        # Check lower and upper bounds
+        lb_i = block['lb']
+        ub_i = block['ub']
+        
+        if not np.all(x_i >= lb_i - tol):
+            result['is_feasible'] = False
+            if 'bounds' not in result['violations']:
+                result['violations']['bounds'] = {}
+            result['violations']['bounds'][f'client_{i}_lb'] = np.minimum(0, x_i - lb_i)
+        
+        if not np.all(x_i <= ub_i + tol):
+            result['is_feasible'] = False
+            if 'bounds' not in result['violations']:
+                result['violations']['bounds'] = {}
+            result['violations']['bounds'][f'client_{i}_ub'] = np.maximum(0, x_i - ub_i)
     
     return result

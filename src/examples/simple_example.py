@@ -4,7 +4,8 @@ Simple example demonstrating the Dantzig-Wolfe decomposition.
 import numpy as np
 import time
 from dantzig_wolfe import DantzigWolfeDecomposition, verify_solution
-from solvers import direct_solve
+from solvers.direct_solve import direct_solve
+import gurobipy as gp
 
 
 def run_example():
@@ -26,24 +27,23 @@ def run_example():
     # One constraint linking blocks: x0 + x1 - x2 - x3 - x4 = 0
     F = np.array([[1, 1, -1, -1, -1]])
 
-    # Block 1 constraints: A1 @ x1 <= b1
-    A1 = np.array([[1, 2], [3, 1]])  # x0 + 2*x1 <= 10  # 3*x0 + x1 <= 15
-    b1 = np.array([10, 15])
+    # Block 1 constraints: A1 @ x1 = b1
+    A1 = np.array([[1, 2], [3, 1]])  # x0 + 2*x1 == 10  # 3*x0 + x1 == 15
+    b1 = np.array([10, 80])
 
-    # Block 2 constraints: A2 @ x2 <= b2
+    # Block 2 constraints: A2 @ x2 = b2
     A2 = np.array(
         [
-            [1, 1, 1],  # x2 + x3 + x4 <= 20
-            [2, 1, 0],  # 2*x2 + x3 <= 8
-            [0, 0, 1],  # x4 <= 5
+            [1, 1, 1],  # x2 + x3 + x4 = 20
+            [2, 1, 0],  # 2*x2 + x3 = 8
         ]
     )
-    b2 = np.array([20, 8, 5])
+    b2 = np.array([20, 8])
 
     # Define client blocks
     client_blocks = [
-        {'A': A1, 'b': b1, 'indices': np.array([0, 1])},
-        {'A': A2, 'b': b2, 'indices': np.array([2, 3, 4])},
+        {'A': A1, 'b': b1, 'indices': np.array([0, 1]), 'lb': np.array([-gp.GRB.INFINITY,-gp.GRB.INFINITY]), 'ub': np.array([gp.GRB.INFINITY,gp.GRB.INFINITY])},
+        {'A': A2, 'b': b2, 'indices': np.array([2, 3, 4]), 'lb': np.array([-gp.GRB.INFINITY,-gp.GRB.INFINITY,-gp.GRB.INFINITY]), 'ub': np.array([gp.GRB.INFINITY,gp.GRB.INFINITY,5])},
     ]
 
     # Create and solve using Dantzig-Wolfe

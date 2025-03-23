@@ -6,18 +6,16 @@ import time
 
 from dantzig_wolfe.master_problem import MasterProblemManager
 from dantzig_wolfe.subproblem import SubproblemSolver
-from dantzig_wolfe.utils import is_optimal
-
 
 class DantzigWolfeDecomposition:
     """
     Implementation of Dantzig-Wolfe decomposition for block-angular structured problems
-    
+        
     Problem structure:
     min c.T @ x
     s.t. F @ x = 0  (complicating constraints)
-         A_i @ x_i <= b_i for each client i
-         x >= 0
+        A_i @ x_i = b_i for each client i
+        lb_i <= x_i <= ub_i for each client i
     """
 
     def __init__(self, c, F, client_blocks, max_iterations=100, optimality_tol=1e-6):
@@ -35,6 +33,8 @@ class DantzigWolfeDecomposition:
             - 'A': Constraint matrix for client i
             - 'b': RHS vector for client i
             - 'indices': Indices of variables for client i in the original problem
+            - 'lb': Lower bounds for variables in this client block
+            - 'ub': Upper bounds for variables in this client block
         max_iterations : int
             Maximum number of column generation iterations
         optimality_tol : float
