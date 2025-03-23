@@ -243,7 +243,9 @@ class SubproblemSolver:
         list
             List of results (reduced_cost, point, objective_value) for each client
         """
-        results: list[Optional[tuple[float, npt.ArrayLike, float]]] = []
+        results: list[Optional[tuple[float, npt.ArrayLike, float]]] = [
+            None
+        ] * self.num_clients
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Create a mapping of future to client index
@@ -266,6 +268,4 @@ class SubproblemSolver:
                     results[client_idx] = result
                 except Exception as e:
                     print(f"Error in subproblem {client_idx}: {e}")
-                    results[client_idx] = None
-
         return results
