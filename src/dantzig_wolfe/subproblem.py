@@ -94,7 +94,7 @@ class SubproblemSolver:
         # Solve
         model.optimize()
 
-        if model.status == GRB.OPTIMAL:
+        if model.Status == GRB.OPTIMAL:
             # Extract solution
             x_values = x.X
 
